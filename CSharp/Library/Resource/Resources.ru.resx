@@ -244,4 +244,13 @@
   <data name="TooManyAttempts" xml:space="preserve">
     <value>слишком много попыток</value>
   </data>
+  <data name="UserProfileDeleted" xml:space="preserve">
+    <value>Профиль пользователя удален!</value>
+  </data>
+  <data name="Confirmation" xml:space="preserve">
+    <value>Подтверждение</value>
+  </data>
+  <data name="UnhandledExceptionToUser" xml:space="preserve">
+    <value>К сожалению, мой скрипт код имеет проблему.</value>
+  </data>
 </root>

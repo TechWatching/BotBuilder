@@ -9,7 +9,7 @@ namespace Microsoft.Bot.Builder.Dialogs
     /// 
     /// %Microsoft %Bot %Builder is a powerful framework for constructing bots that can handle
     /// both freeform interactions and more guided ones where the possibilities are explicitly 
-    /// shown to the user.  It is easy to use and leverages C# to provide a natural way to 
+    /// shown to the user. It is easy to use and leverages C# to provide a natural way to 
     /// write bots.
     /// 
     /// High Level Features:
@@ -23,13 +23,13 @@ namespace Microsoft.Bot.Builder.Dialogs
     /// \section install Install
     /// 
     /// In order to use the %Microsoft %Bot %Builder you should first follow the install steps in the 
-    /// [Getting Started with Bot Connector] page to setup your bot.  
+    /// \ref gettingstarted page to setup your bot.  
     /// In order to use the framework you need to:
     /// 1. Right-click on your project and select "Manage NuGet Packages".  
     /// 2. In the "Browse" tab, type "Microsoft.Bot.Builder".  
     /// 3. Click the "Install" button and accept the changes.  
     /// 
-    /// At this point your project has the builder installed and is ready to use it.  If you want to understand how
+    /// At this point your project has the builder installed and is ready to use it. If you want to understand how
     /// to create and use dialogs, see \ref dialogs or if you would like to have a dialog automatically constructed see \ref forms.
     /// 
     /// \section debugging Debugging
@@ -51,10 +51,12 @@ namespace Microsoft.Bot.Builder.Dialogs
     /// 
     /// If you have problems or suggestions, please visit our [support page](/support/).
     /// 
-    /// \tableofcontents
     ///
     ///
 }
+
+/// <summary>Root namespace for the %Microsoft %Bot %Connector %SDK.</summary>
+namespace Microsoft.Bot.Connector { }
 
 /// <summary>Root namespace for the %Microsoft %Bot %Builder %SDK.</summary>
 namespace Microsoft.Bot.Builder { }
@@ -76,6 +78,11 @@ namespace Microsoft.Bot.Builder.FormFlow { }
 /// Namespace for \ref FormFlow declaratively defined with JSON Schema.
 /// </summary>
 namespace Microsoft.Bot.Builder.FormFlow.Json { }
+
+/// <summary>
+/// Root namespace for the %Microsoft %Bot %Builder %Calling %SDK.
+/// </summary>
+namespace Microsoft.Bot.Builder.Calling { }
 
 /// <summary>Namespace for \ref FormFlow advanced building blocks.</summary>
 /// <remarks>

@@ -18,7 +18,7 @@ namespace Microsoft.Bot.Sample.EchoBot
             context.Wait(MessageReceivedAsync);
         }
 
-        public virtual async Task MessageReceivedAsync(IDialogContext context, IAwaitable<Message> argument)
+        public virtual async Task MessageReceivedAsync(IDialogContext context, IAwaitable<IMessageActivity> argument)
         {
             var message = await argument;
             if (message.Text == "reset")
@@ -32,7 +32,7 @@ namespace Microsoft.Bot.Sample.EchoBot
             }
             else
             {
-                await context.PostAsync(string.Format("{0}: You said {1}", this.count++, message.Text)); 
+                await context.PostAsync(string.Format("{0}: You said {1}", this.count++, message.Text));
                 context.Wait(MessageReceivedAsync);
             }
         }

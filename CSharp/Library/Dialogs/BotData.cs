@@ -38,15 +38,20 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Configuration;
 using System.IO;
+using System.IO.Compression;
+using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Web;
 
 namespace Microsoft.Bot.Builder.Dialogs.Internals
 {
     public enum BotStoreType
     {
         BotConversationData,
-        BotPerUserInConversationData,
+        BotPrivateConversationData,
         BotUserData
     }
 
@@ -55,6 +60,7 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
         public string UserId { get; set; }
         public string ConversationId { get; set; }
         public string BotId { get; set; }
+        public string ChannelId { get; set; }
 
         public override bool Equals(object obj)
         {
@@ -67,226 +73,65 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
                 var otherKey = (BotDataKey)obj;
                 return otherKey.UserId == this.UserId &&
                     otherKey.ConversationId == this.ConversationId &&
+                    otherKey.ChannelId == this.ChannelId &&
                     otherKey.BotId == this.BotId;
             }
         }
 
         public override int GetHashCode()
         {
-            return UserId.GetHashCode() + 
-                ConversationId.GetHashCode() + 
-                BotId.GetHashCode();
+            return UserId.GetHashCode() +
+                ConversationId.GetHashCode() +
+                BotId.GetHashCode() +
+                ChannelId.GetHashCode();
         }
     }
 
-    public interface IBotDataStore
+    public interface IBotDataStore<T>
     {
-        Task<T> LoadAsync<T>(BotDataKey key, BotStoreType botStoreType);
-
-        Task SaveAsync(BotDataKey key, BotStoreType botStoreType, object value);
-
-        Task<bool> FlushAsync(BotDataKey key); 
-    }
-    
-    public class MessageBackedStore : IBotDataStore
-    {
-        protected readonly Message message;
-        public MessageBackedStore(Message message)
-        {
-            SetField.NotNull(out this.message, nameof(message), message);
-        }
-
-        private bool ValidateKey(BotDataKey key)
-        {
-            return key.UserId == message.From?.Id &&
-                   key.BotId == message.To?.Id &&
-                   key.ConversationId == message.ConversationId;
-        }
-
-        public Task<bool> FlushAsync(BotDataKey key)
-        {
-            // no-op for message backed store
-            return Task.FromResult(ValidateKey(key));
-        }
-
-        public Task SaveAsync(BotDataKey key, BotStoreType botStoreType, object value)
-        {
-            try
-            {
-                if (!ValidateKey(key))
-                {
-                    throw new ArgumentException("Invalid bot data key!");
-                }
-
-                switch (botStoreType)
-                {
-                    case BotStoreType.BotConversationData:
-                        message.BotConversationData = value;
-                        break;
-                    case BotStoreType.BotPerUserInConversationData:
-                        message.BotPerUserInConversationData = value;
-                        break;
-                    case BotStoreType.BotUserData:
-                        message.BotUserData = value;
-                        break;
-                    default:
-                        throw new ArgumentException($"key {botStoreType} is not supported by this message store");
-                }
-
-                return Task.FromResult(Type.Missing);
-            }
-            catch(Exception e)
-            {
-                return Task.FromException(e);
-            }
-        }
-
-        public Task<T> LoadAsync<T>(BotDataKey key, BotStoreType botStoreType)
-        {
-            try
-            {
-                if (!ValidateKey(key))
-                {
-                    throw new ArgumentException("Invalid bot data key!");
-                }
-
-                var value = default(T);
-
-                switch (botStoreType.ToString())
-                {
-                    case nameof(message.BotConversationData):
-                        value = (T)message.BotConversationData;
-                        break;
-                    case nameof(message.BotPerUserInConversationData):
-                        value = (T)message.BotPerUserInConversationData;
-                        break;
-                    case nameof(message.BotUserData):
-                        value = (T)message.BotUserData;
-                        break;
-                    default:
-                        value = default(T);
-                        break;
-                }
-                return Task.FromResult(value);
-            }
-            catch (Exception e)
-            {
-                return Task.FromException<T>(e);
-            }
-        }
+        Task<T> LoadAsync(BotDataKey key, BotStoreType botStoreType, CancellationToken cancellationToken);
+        Task SaveAsync(BotDataKey key, BotStoreType botStoreType, T data, CancellationToken cancellationToken);
+        Task<bool> FlushAsync(BotDataKey key, CancellationToken cancellationToken);
     }
 
-    public class InMemoryBotDataStore : IBotDataStore
+    public class InMemoryDataStore : IBotDataStore<BotData>
     {
-        //TODO: ensure data consistency between store and cache.
         internal readonly ConcurrentDictionary<string, string> store = new ConcurrentDictionary<string, string>();
-
-        internal readonly ConcurrentDictionary<BotDataKey, DataEntry> cache = new ConcurrentDictionary<BotDataKey, DataEntry>(); 
-
-        internal class DataEntry
+        private readonly Dictionary<BotStoreType, object> locks = new Dictionary<BotStoreType, object>()
         {
-            public object BotConversationData { set; get; }
-            public object BotPerUserInConversationData { set; get; }
-            public object BotUserData { set; get;} 
+            { BotStoreType.BotConversationData, new object() },
+            { BotStoreType.BotPrivateConversationData, new object() },
+            { BotStoreType.BotUserData, new object() }
+        };
+
+        async Task<BotData> IBotDataStore<BotData>.LoadAsync(BotDataKey key, BotStoreType botStoreType, CancellationToken cancellationToken)
+        {
+            string serializedData;
+            serializedData = store.GetOrAdd(GetKey(key, botStoreType),
+                                            dictionaryKey => Serialize(new BotData { ETag = DateTime.UtcNow.Ticks.ToString() }));
+            return Deserialize(serializedData);
         }
 
-        public async Task<bool> FlushAsync(BotDataKey key)
+        async Task IBotDataStore<BotData>.SaveAsync(BotDataKey key, BotStoreType botStoreType, BotData botData, CancellationToken cancellationToken)
         {
-            DataEntry entry = default(DataEntry);
-            if (cache.TryRemove(key, out entry))
+            lock (locks[botStoreType])
             {
-                this.Save(key, entry);
-                return true; 
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        public async Task<T> LoadAsync<T>(BotDataKey key, BotStoreType botStoreType)
-        {
-            DataEntry entry;
-            T obj = default(T);
-            if (!cache.TryGetValue(key, out entry))
-            {
-                entry = new DataEntry();
-                cache[key] = entry;
-
-                string value;
-
-                if (store.TryGetValue(GetKey(key, botStoreType), out value))
+                store.AddOrUpdate(GetKey(key, botStoreType), Serialize(botData), (dictionaryKey, value) =>
                 {
-                    obj = (T)JsonConvert.DeserializeObject(value);
-                }
-
-                SetValue(entry, botStoreType, obj);
-                return obj;
-            }
-            else
-            {
-                switch (botStoreType)
-                {
-                    case BotStoreType.BotConversationData:
-                        if (entry.BotConversationData != null)
-                        {
-                            obj = (T)entry.BotConversationData;
-                        }
-                        break;
-                    case BotStoreType.BotPerUserInConversationData:
-                        if (entry.BotPerUserInConversationData != null)
-                        {
-                            obj = (T)entry.BotPerUserInConversationData;
-                        }
-                        break;
-                    case BotStoreType.BotUserData:
-                        if (entry.BotUserData != null)
-                        {
-                            obj = (T)entry.BotUserData;
-                        }
-                        break;
-                }
-
-                if(obj == null)
-                {
-                    string value;
-                    if (store.TryGetValue(GetKey(key, botStoreType), out value))
+                    if (botData.ETag != "*" && Deserialize(value).ETag != botData.ETag)
                     {
-                        obj = (T)JsonConvert.DeserializeObject(value);
-                        SetValue(entry, botStoreType, obj);
+                        throw new HttpException((int)HttpStatusCode.PreconditionFailed, "Inconsistent SaveAsync based on ETag!");
                     }
-                }
-
-                return obj;
+                    botData.ETag = DateTime.UtcNow.Ticks.ToString();
+                    return Serialize(botData);
+                });
             }
         }
 
-        public async Task SaveAsync(BotDataKey key, BotStoreType botStoreType, object value)
+        Task<bool> IBotDataStore<BotData>.FlushAsync(BotDataKey key, CancellationToken cancellationToken)
         {
-            DataEntry entry;
-            if (!cache.TryGetValue(key, out entry))
-            {
-                entry = new DataEntry();
-                cache[key] = entry;
-            }
-
-            SetValue(entry, botStoreType, value);
-        }
-
-        private void SetValue(DataEntry entry, BotStoreType botStoreType, object value)
-        {
-            switch (botStoreType)
-            {
-                case BotStoreType.BotConversationData:
-                    entry.BotConversationData = value;
-                    break;
-                case BotStoreType.BotPerUserInConversationData:
-                    entry.BotPerUserInConversationData = value;
-                    break;
-                case BotStoreType.BotUserData:
-                    entry.BotUserData = value;
-                    break;
-            }
+            // Everything is saved. Flush is no-op
+            return Task.FromResult(true);
         }
 
         private string GetKey(BotDataKey key, BotStoreType botStoreType)
@@ -294,68 +139,321 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             switch (botStoreType)
             {
                 case BotStoreType.BotConversationData:
-                    return $"conversation:{key.BotId}:{key.ConversationId}";
+                    return $"conversation:{key.BotId}:{key.ChannelId}:{key.ConversationId}";
                 case BotStoreType.BotUserData:
-                    return $"user:{key.BotId}:{key.UserId}";
-                case BotStoreType.BotPerUserInConversationData:
-                    return $"perUserInConversation:{key.BotId}:{key.UserId}:{key.ConversationId}";
+                    return $"user:{key.BotId}:{key.ChannelId}:{key.UserId}";
+                case BotStoreType.BotPrivateConversationData:
+                    return $"privateConversation:{key.BotId}:{key.ChannelId}:{key.UserId}:{key.ConversationId}";
                 default:
                     throw new ArgumentException("Unsupported bot store type!");
             }
         }
 
-        private void Save(BotDataKey key, DataEntry entry)
+        private static string Serialize(BotData data)
         {
-            if(entry?.BotConversationData != null)
+            using (var cmpStream = new MemoryStream())
+            using (var stream = new GZipStream(cmpStream, CompressionMode.Compress))
+            using (var streamWriter = new StreamWriter(stream))
             {
-                store[GetKey(key, BotStoreType.BotConversationData)] = JsonConvert.SerializeObject(entry.BotConversationData);
-            }
-
-            if(entry?.BotUserData != null)
-            {
-                store[GetKey(key, BotStoreType.BotUserData)] = JsonConvert.SerializeObject(entry.BotUserData);
-            }
-
-            if(entry?.BotPerUserInConversationData != null)
-            {
-                store[GetKey(key, BotStoreType.BotPerUserInConversationData)] = JsonConvert.SerializeObject(entry.BotPerUserInConversationData);
+                var serializedJSon = JsonConvert.SerializeObject(data);
+                streamWriter.Write(serializedJSon);
+                streamWriter.Close();
+                stream.Close();
+                return Convert.ToBase64String(cmpStream.ToArray());
             }
         }
 
+        private static BotData Deserialize(string str)
+        {
+            byte[] bytes = Convert.FromBase64String(str);
+            using (var stream = new MemoryStream(bytes))
+            using (var gz = new GZipStream(stream, CompressionMode.Decompress))
+            using (var streamReader = new StreamReader(gz))
+            {
+                return JsonConvert.DeserializeObject<BotData>(streamReader.ReadToEnd());
+            }
+        }
+    }
+
+    public class ConnectorStore : IBotDataStore<BotData>
+    {
+        private readonly IStateClient stateClient;
+        public ConnectorStore(IStateClient stateClient)
+        {
+            SetField.NotNull(out this.stateClient, nameof(stateClient), stateClient);
+        }
+
+        async Task<BotData> IBotDataStore<BotData>.LoadAsync(BotDataKey key, BotStoreType botStoreType, CancellationToken cancellationToken)
+        {
+            BotData botData;
+            switch (botStoreType)
+            {
+                case BotStoreType.BotConversationData:
+                    botData = await stateClient.BotState.GetConversationDataAsync(key.ChannelId, key.ConversationId, cancellationToken);
+                    break;
+                case BotStoreType.BotUserData:
+                    botData = await stateClient.BotState.GetUserDataAsync(key.ChannelId, key.UserId, cancellationToken);
+                    break;
+                case BotStoreType.BotPrivateConversationData:
+                    botData = await stateClient.BotState.GetPrivateConversationDataAsync(key.ChannelId, key.ConversationId, key.UserId, cancellationToken);
+                    break;
+                default:
+                    throw new ArgumentException($"{botStoreType} is not a valid store type!");
+            }
+            return botData;
+        }
+
+        async Task IBotDataStore<BotData>.SaveAsync(BotDataKey key, BotStoreType botStoreType, BotData botData, CancellationToken cancellationToken)
+        {
+            switch (botStoreType)
+            {
+                case BotStoreType.BotConversationData:
+                    await stateClient.BotState.SetConversationDataAsync(key.ChannelId, key.ConversationId, botData, cancellationToken);
+                    break;
+                case BotStoreType.BotUserData:
+                    await stateClient.BotState.SetUserDataAsync(key.ChannelId, key.UserId, botData, cancellationToken);
+                    break;
+                case BotStoreType.BotPrivateConversationData:
+                    await stateClient.BotState.SetPrivateConversationDataAsync(key.ChannelId, key.ConversationId, key.UserId, botData, cancellationToken);
+                    break;
+                default:
+                    throw new ArgumentException($"{botStoreType} is not a valid store type!");
+            }
+        }
+
+        Task<bool> IBotDataStore<BotData>.FlushAsync(BotDataKey key, CancellationToken cancellationToken)
+        {
+            // Everything is saved. Flush is no-op
+            return Task.FromResult(true);
+        }
+    }
+
+    /// <summary>
+    /// The data consistency policy for <see cref="CachingBotDataStore"/>
+    /// </summary>
+    public enum CachingBotDataStoreConsistencyPolicy
+    {
+        /// <summary>
+        /// Causes <see cref="CachingBotDataStore"/> to set <see cref="BotData.ETag"/> to "*" when it flushes the data to storage. 
+        /// As a result last write will overwrite the data.
+        /// </summary>
+        LastWriteWins,
+        /// <summary>
+        /// Causes <see cref="CachingBotDataStore"/> to write data with the same <see cref="BotData.ETag"/> 
+        /// returned by <see cref="CachingBotDataStore.inner"/>. As a result <see cref="IBotDataStore{T}.FlushAsync(BotDataKey, CancellationToken)"/>
+        /// might fail because of ETag inconsistencies.
+        /// </summary>
+        ETagBasedConsistency
+    }
+
+    /// <summary>
+    /// Caches data for <see cref="BotDataBase{T}"/> and wraps the data in <see cref="BotData"/> to be stored in <see cref="CachingBotDataStore.inner"/>
+    /// </summary>
+    public class CachingBotDataStore : IBotDataStore<BotData>
+    {
+        private readonly IBotDataStore<BotData> inner;
+        internal readonly Dictionary<BotDataKey, CacheEntry> cache = new Dictionary<BotDataKey, CacheEntry>();
+        private readonly CachingBotDataStoreConsistencyPolicy dataConsistencyPolicy;
+
+        public CachingBotDataStore(IBotDataStore<BotData> inner, CachingBotDataStoreConsistencyPolicy dataConsistencyPolicy)
+        {
+            SetField.NotNull(out this.inner, nameof(inner), inner);
+            this.dataConsistencyPolicy = dataConsistencyPolicy;
+        }
+
+        internal class CacheEntry
+        {
+            public BotData BotConversationData { set; get; }
+            public BotData BotPrivateConversationData { set; get; }
+            public BotData BotUserData { set; get; }
+        }
+
+        async Task<bool> IBotDataStore<BotData>.FlushAsync(BotDataKey key, CancellationToken cancellationToken)
+        {
+            CacheEntry entry = default(CacheEntry);
+            if (cache.TryGetValue(key, out entry))
+            {
+                // Removing the cached entry to make sure that we are not leaking 
+                // flushed entries when CachingBotDataStore is registered as a singleton object.
+                // Also since this store is not updating ETags on LoadAsync(...), there 
+                // will be a conflict if we reuse the cached entries after flush. 
+                cache.Remove(key);
+                await this.Save(key, entry, cancellationToken);
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        async Task<BotData> IBotDataStore<BotData>.LoadAsync(BotDataKey key, BotStoreType botStoreType, CancellationToken cancellationToken)
+        {
+            CacheEntry cacheEntry;
+            BotData value = null;
+            if (!cache.TryGetValue(key, out cacheEntry))
+            {
+                cacheEntry = new CacheEntry();
+                cache.Add(key, cacheEntry);
+                value = await LoadFromInnerAndCache(cacheEntry, botStoreType, key, cancellationToken);
+            }
+            else
+            {
+                switch (botStoreType)
+                {
+                    case BotStoreType.BotConversationData:
+                        if (cacheEntry.BotConversationData != null)
+                        {
+                            value = cacheEntry.BotConversationData;
+                        }
+                        break;
+                    case BotStoreType.BotPrivateConversationData:
+                        if (cacheEntry.BotPrivateConversationData != null)
+                        {
+                            value = cacheEntry.BotPrivateConversationData;
+                        }
+                        break;
+                    case BotStoreType.BotUserData:
+                        if (cacheEntry.BotUserData != null)
+                        {
+                            value = cacheEntry.BotUserData;
+                        }
+                        break;
+                }
+
+                if (value == null)
+                {
+                    value = await LoadFromInnerAndCache(cacheEntry, botStoreType, key, cancellationToken);
+                }
+            }
+
+            return value;
+        }
+
+        async Task IBotDataStore<BotData>.SaveAsync(BotDataKey key, BotStoreType botStoreType, BotData value, CancellationToken cancellationToken)
+        {
+            CacheEntry entry;
+            if (!cache.TryGetValue(key, out entry))
+            {
+                entry = new CacheEntry();
+                cache.Add(key, entry);
+            }
+
+            SetCachedValue(entry, botStoreType, value);
+        }
+
+        private async Task<BotData> LoadFromInnerAndCache(CacheEntry cacheEntry, BotStoreType botStoreType, BotDataKey key, CancellationToken token)
+        {
+            var value = await inner.LoadAsync(key, botStoreType, token);
+
+            if (value != null)
+            {
+                SetCachedValue(cacheEntry, botStoreType, value);
+            }
+            else
+            {
+                // inner store returned null, we create a new instance of BotData with ETag = "*"
+                value = new BotData() { ETag = "*" };
+                SetCachedValue(cacheEntry, botStoreType, value);
+            }
+            return value;
+        }
+
+        private void SetCachedValue(CacheEntry entry, BotStoreType botStoreType, BotData value)
+        {
+            switch (botStoreType)
+            {
+                case BotStoreType.BotConversationData:
+                    entry.BotConversationData = value;
+                    break;
+                case BotStoreType.BotPrivateConversationData:
+                    entry.BotPrivateConversationData = value;
+                    break;
+                case BotStoreType.BotUserData:
+                    entry.BotUserData = value;
+                    break;
+            }
+        }
+
+        private async Task Save(BotDataKey key, CacheEntry entry, CancellationToken cancellationToken)
+        {
+            var tasks = new List<Task>();
+
+            switch (this.dataConsistencyPolicy)
+            {
+                case CachingBotDataStoreConsistencyPolicy.LastWriteWins:
+                    if (entry?.BotConversationData != null)
+                    {
+                        entry.BotConversationData.ETag = "*";
+                    }
+
+                    if (entry?.BotUserData != null)
+                    {
+                        entry.BotUserData.ETag = "*";
+                    }
+
+                    if (entry?.BotPrivateConversationData != null)
+                    {
+                        entry.BotPrivateConversationData.ETag = "*";
+                    }
+                    break;
+                case CachingBotDataStoreConsistencyPolicy.ETagBasedConsistency:
+                    // no action needed, store relies on the ETags returned by inner store
+                    break;
+                default:
+                    throw new ArgumentException($"{this.dataConsistencyPolicy} is not a valid consistency policy!");
+            }
+
+            if (entry?.BotConversationData != null)
+            {
+                tasks.Add(inner.SaveAsync(key, BotStoreType.BotConversationData, entry.BotConversationData, cancellationToken));
+            }
+
+            if (entry?.BotUserData != null)
+            {
+                tasks.Add(inner.SaveAsync(key, BotStoreType.BotUserData, entry.BotUserData, cancellationToken));
+            }
+
+            if (entry?.BotPrivateConversationData != null)
+            {
+                tasks.Add(inner.SaveAsync(key, BotStoreType.BotPrivateConversationData, entry.BotPrivateConversationData, cancellationToken));
+            }
+            await Task.WhenAll(tasks);
+        }
     }
 
     public abstract class BotDataBase<T> : IBotData
     {
-        protected readonly IBotDataStore botDataStore;
+        protected readonly IBotDataStore<BotData> botDataStore;
         protected readonly BotDataKey botDataKey;
         private IBotDataBag conversationData;
-        private IBotDataBag perUserInConversationData;
+        private IBotDataBag privateConversationData;
         private IBotDataBag userData;
 
-        public BotDataBase(Message message, IBotDataStore botDataStore)
+        public BotDataBase(IBotIdResolver botIdResolver, IMessageActivity message, IBotDataStore<BotData> botDataStore)
         {
             SetField.NotNull(out this.botDataStore, nameof(BotDataBase<T>.botDataStore), botDataStore);
             SetField.CheckNull(nameof(message), message);
-            this.botDataKey = message.GetBotDataKey(); 
+            this.botDataKey = message.GetBotDataKey(botIdResolver.BotId);
         }
 
         protected abstract T MakeData();
         protected abstract IBotDataBag WrapData(T data);
 
-        public async Task LoadAsync()
+        public async Task LoadAsync(CancellationToken cancellationToken)
         {
-            var conversationTask = LoadData(BotStoreType.BotConversationData);
-            var perUserInConversationTask = LoadData(BotStoreType.BotPerUserInConversationData);
-            var userTask = LoadData(BotStoreType.BotUserData);
+            var conversationTask = LoadData(BotStoreType.BotConversationData, cancellationToken);
+            var privateConversationTask = LoadData(BotStoreType.BotPrivateConversationData, cancellationToken);
+            var userTask = LoadData(BotStoreType.BotUserData, cancellationToken);
 
             this.conversationData = await conversationTask;
-            this.perUserInConversationData = await perUserInConversationTask;
-            this.userData = await userTask; 
+            this.privateConversationData = await privateConversationTask;
+            this.userData = await userTask;
         }
 
-        public async Task FlushAsync()
+        public async Task FlushAsync(CancellationToken cancellationToken)
         {
-            await this.botDataStore.FlushAsync(botDataKey);
+            await this.botDataStore.FlushAsync(botDataKey, cancellationToken);
         }
 
         IBotDataBag IBotData.ConversationData
@@ -367,12 +465,12 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             }
         }
 
-        IBotDataBag IBotData.PerUserInConversationData
+        IBotDataBag IBotData.PrivateConversationData
         {
             get
             {
-                CheckNull(nameof(perUserInConversationData), perUserInConversationData);
-                return this.perUserInConversationData;
+                CheckNull(nameof(privateConversationData), privateConversationData);
+                return this.privateConversationData;
             }
         }
 
@@ -385,15 +483,15 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             }
         }
 
-        private async Task<IBotDataBag> LoadData(BotStoreType botStoreType)
+        private async Task<IBotDataBag> LoadData(BotStoreType botStoreType, CancellationToken cancellationToken)
         {
-            T data = await this.botDataStore.LoadAsync<T>(botDataKey, botStoreType);
-            if (data == null)
+            var botData = await this.botDataStore.LoadAsync(botDataKey, botStoreType, cancellationToken);
+            if (botData?.Data == null)
             {
-                data = this.MakeData();
-                await this.botDataStore.SaveAsync(botDataKey, botStoreType, data);
+                botData.Data = this.MakeData();
+                await this.botDataStore.SaveAsync(botDataKey, botStoreType, botData, cancellationToken);
             }
-            return this.WrapData(data);
+            return this.WrapData((T)botData.Data);
         }
 
         private void CheckNull(string name, IBotDataBag value)
@@ -407,8 +505,8 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
     public sealed class DictionaryBotData : BotDataBase<Dictionary<string, object>>
     {
-        public DictionaryBotData(Message message, IBotDataStore botDataStore)
-            : base(message, botDataStore)
+        public DictionaryBotData(IBotIdResolver botIdResolver, IMessageActivity message, IBotDataStore<BotData> botDataStore)
+            : base(botIdResolver, message, botDataStore)
         {
         }
 
@@ -453,6 +551,11 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             {
                 return this.bag.Remove(key);
             }
+
+            void IBotDataBag.Clear()
+            {
+                this.bag.Clear();
+            }
         }
 
         protected override IBotDataBag WrapData(Dictionary<string, object> data)
@@ -463,8 +566,8 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
     public sealed class JObjectBotData : BotDataBase<JObject>
     {
-        public JObjectBotData(Message message, IBotDataStore botDataStore)
-            : base(message, botDataStore)
+        public JObjectBotData(IBotIdResolver botIdResolver, IMessageActivity message, IBotDataStore<BotData> botDataStore)
+            : base(botIdResolver, message, botDataStore)
         {
         }
 
@@ -509,6 +612,12 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             {
                 return this.bag.Remove(key);
             }
+
+            void IBotDataBag.Clear()
+            {
+                this.bag.RemoveAll();
+            }
+
         }
 
         protected override IBotDataBag WrapData(JObject data)
@@ -549,16 +658,34 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
         }
     }
 
+    public interface IBotIdResolver
+    {
+        string BotId { get; }
+    }
+
+    public sealed class BotIdResolver : IBotIdResolver
+    {
+        private readonly string botId;
+
+        public string BotId { get { return botId; } }
+
+        public BotIdResolver(string botId = null)
+        {
+            SetField.NotNull(out this.botId, nameof(botId), botId ?? ConfigurationManager.AppSettings["BotId"] ?? ConfigurationManager.AppSettings["MicrosoftAppId"]);
+        }
+    }
+
     public static partial class Extensions
     {
-        public static BotDataKey GetBotDataKey(this Message message)
+        public static BotDataKey GetBotDataKey(this IMessageActivity message, string botId)
         {
-            var toIsBot = message.To.IsBot.HasValue && message.To.IsBot.Value;
+            SetField.CheckNull(nameof(botId), botId);
             return new BotDataKey
             {
-                BotId =  toIsBot ? message.To.Id : message.From.Id,
-                UserId = toIsBot ? message.From.Id : message.To.Id,
-                ConversationId = message.ConversationId
+                BotId = botId,
+                UserId = message.From.Id,
+                ConversationId = message.Conversation.Id,
+                ChannelId = message.ChannelId
             };
         }
     }

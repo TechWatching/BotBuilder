@@ -242,4 +242,13 @@
   <data name="TooManyAttempts" xml:space="preserve">
     <value>troppi tentativi</value>
   </data>
+  <data name="UserProfileDeleted" xml:space="preserve">
+    <value>Profilo di utente cancellato!</value>
+  </data>
+  <data name="Confirmation" xml:space="preserve">
+    <value>Conferma</value>
+  </data>
+  <data name="UnhandledExceptionToUser" xml:space="preserve">
+    <value>Ci dispiace, il mio codice di bot sta riscontrando un problema.</value>
+  </data>
 </root>

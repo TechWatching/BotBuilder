@@ -62,11 +62,11 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             }
         }
 
-        IBotDataBag IBotData.PerUserInConversationData
+        IBotDataBag IBotData.PrivateConversationData
         {
             get
             {
-                return this.botData.PerUserInConversationData;
+                return this.botData.PrivateConversationData;
             }
         }
 
@@ -78,12 +78,12 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             }
         }
 
-        async Task IBotToUser.PostAsync(Message message, CancellationToken cancellationToken)
+        async Task IBotToUser.PostAsync(IMessageActivity message, CancellationToken cancellationToken)
         {
             await this.botToUser.PostAsync(message, cancellationToken);
         }
 
-        Message IBotToUser.MakeMessage()
+        IMessageActivity IBotToUser.MakeMessage()
         {
             return this.botToUser.MakeMessage();
         }
@@ -103,7 +103,7 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
         async Task IDialogStack.Forward<R, T>(IDialog<R> child, ResumeAfter<R> resume, T item, CancellationToken token)
         {
-            await this.stack.Forward<R,T>(child, resume, item, token);
+            await this.stack.Forward<R, T>(child, resume, item, token);
         }
 
         void IDialogStack.Done<R>(R value)
@@ -126,14 +126,19 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             await this.stack.PollAsync(token);
         }
 
-        async Task IBotData.LoadAsync()
+        void IDialogStack.Reset()
         {
-            await this.botData.LoadAsync(); 
+            this.stack.Reset();
         }
 
-        async Task IBotData.FlushAsync()
+        async Task IBotData.LoadAsync(CancellationToken cancellationToken)
         {
-            await this.botData.FlushAsync(); 
+            await this.botData.LoadAsync(cancellationToken);
+        }
+
+        async Task IBotData.FlushAsync(CancellationToken cancellationToken)
+        {
+            await this.botData.FlushAsync(cancellationToken);
         }
     }
 }

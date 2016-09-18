@@ -61,9 +61,9 @@ namespace Microsoft.Bot.Builder.Tests
             SetField.NotNull(out this.regex, nameof(regex), regex);
         }
 
-        async Task<object> IScorable<double>.PrepareAsync<Item>(Item item, Delegate method, CancellationToken token)
+        async Task<object> IScorable<double>.PrepareAsync<Item>(Item item, CancellationToken token)
         {
-            var message = item as Message;
+            var message = item as IMessageActivity;
             if (message != null && message.Text != null)
             {
                 var text = message.Text;
@@ -91,7 +91,7 @@ namespace Microsoft.Bot.Builder.Tests
             }
         }
 
-        async Task IScorable<double>.PostAsync<Item>(IPostToBot inner, Item item, object state, CancellationToken token)
+        async Task IScorable<double>.PostAsync<Item>(Item item, object state, CancellationToken token)
         {
             this.stack.Fail(new OperationCanceledException());
             await this.stack.PollAsync(token);
@@ -216,7 +216,7 @@ namespace Microsoft.Bot.Builder.Tests
             }
         }
 
-        public async Task MessageReceived(IDialogContext context, IAwaitable<Message> message)
+        public async Task MessageReceived(IDialogContext context, IAwaitable<IMessageActivity> message)
         {
             var toBot = await message;
             var value = Evaluate(toBot.Text);
@@ -236,9 +236,9 @@ namespace Microsoft.Bot.Builder.Tests
             SetField.NotNull(out this.regex, nameof(regex), regex);
         }
 
-        async Task<object> IScorable<double>.PrepareAsync<Item>(Item item, Delegate method, CancellationToken token)
+        async Task<object> IScorable<double>.PrepareAsync<Item>(Item item, CancellationToken token)
         {
-            var message = item as Message;
+            var message = item as IMessageActivity;
             if (message != null && message.Text != null)
             {
                 var text = message.Text;
@@ -259,15 +259,15 @@ namespace Microsoft.Bot.Builder.Tests
             return matched;
         }
 
-        async Task IScorable<double>.PostAsync<Item>(IPostToBot inner, Item item, object state, CancellationToken token)
+        async Task IScorable<double>.PostAsync<Item>(Item item, object state, CancellationToken token)
         {
             var dialog = new CalculatorDialog();
 
             // let's strip off the prefix in favor of the actual arithmetic expression
-            var message = (Message)(object)item;
+            var message = (IMessageActivity)(object)item;
             message.Text = (string)state;
 
-            await this.stack.Forward(dialog.Void<double, Message>(), null, item, token);
+            await this.stack.Forward(dialog.Void<double, IMessageActivity>(), null, item, token);
             await this.stack.PollAsync(token);
         }
     }

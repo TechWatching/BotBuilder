@@ -34,8 +34,10 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Resources;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -155,7 +157,7 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
                 var frame = frames[index];
                 var wait = frame.Wait;
                 var rest = wait.Rest;
-                var thunk = (IThunk) rest.Target;
+                var thunk = (IThunk)rest.Target;
                 return thunk.Method;
             }
 
@@ -210,7 +212,8 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             IDialogStack stack = this;
             stack.Call(child, resume);
             await stack.PollAsync(token);
-            await (this as IPostToBot).PostAsync(item, token);
+            IPostToBot postToBot = this;
+            await postToBot.PostAsync(item, token);
         }
 
         void IDialogStack.Done<R>(R value)
@@ -230,15 +233,13 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
         async Task IDialogStack.PollAsync(CancellationToken token)
         {
-            await this.fiber.PollAsync(this);
-        }
-
-        async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
-        {
             try
             {
-                this.fiber.Post(item);
                 await this.fiber.PollAsync(this);
+
+                // this line will throw an error if the code does not schedule the next callback
+                // to wait for the next message sent from the user to the bot.
+                this.fiber.Wait.ValidateNeed(Need.Wait);
             }
             catch
             {
@@ -248,8 +249,22 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
             finally
             {
                 this.store.Save(this.fiber);
-                this.store.Flush(); 
+                this.store.Flush();
             }
+        }
+
+        void IDialogStack.Reset()
+        {
+            this.store.Reset();
+            this.store.Flush();
+            this.fiber.Reset();
+        }
+
+        async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
+        {
+            this.fiber.Post(item);
+            IDialogStack stack = this;
+            await stack.PollAsync(token);
         }
     }
 
@@ -290,23 +305,48 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
         }
     }
 
+    public sealed class ExceptionTranslationDialogTask : IPostToBot
+    {
+        private readonly IPostToBot inner;
+
+        public ExceptionTranslationDialogTask(IPostToBot inner)
+        {
+            SetField.NotNull(out this.inner, nameof(inner), inner);
+        }
+
+        async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
+        {
+            try
+            {
+                await this.inner.PostAsync(item, token);
+            }
+            catch (InvalidNeedException error) when (error.Need == Need.Wait && error.Have == Need.Done)
+            {
+                throw new NoResumeHandlerException(error);
+            }
+            catch (InvalidNeedException error) when (error.Need == Need.Call && error.Have == Need.Wait)
+            {
+                throw new MultipleResumeHandlerException(error);
+            }
+        }
+    }
 
     public struct LocalizedScope : IDisposable
     {
         private readonly CultureInfo previousCulture;
         private readonly CultureInfo previousUICulture;
 
-        public LocalizedScope(string language)
+        public LocalizedScope(string locale)
         {
             this.previousCulture = Thread.CurrentThread.CurrentCulture;
             this.previousUICulture = Thread.CurrentThread.CurrentUICulture;
 
-            if (!string.IsNullOrWhiteSpace(language))
+            if (!string.IsNullOrWhiteSpace(locale))
             {
                 CultureInfo found = null;
                 try
                 {
-                    found = CultureInfo.GetCultureInfo(language);
+                    found = CultureInfo.GetCultureInfo(locale);
                 }
                 catch (CultureNotFoundException)
                 {
@@ -338,7 +378,7 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
         async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
         {
-            using (new LocalizedScope((item as Message)?.Language))
+            using (new LocalizedScope((item as IMessageActivity)?.Locale))
             {
                 await this.inner.PostAsync<T>(item, token);
             }
@@ -349,11 +389,11 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
     {
         private readonly Lazy<IPostToBot> inner;
         private readonly IConnectorClient client;
-        private readonly Message message;
+        private readonly IMessageActivity message;
         private readonly IBotToUser botToUser;
         private readonly IBotData botData;
 
-        public PersistentDialogTask(Func<IPostToBot> makeInner, Message message, IConnectorClient client, IBotToUser botToUser, IBotData botData)
+        public PersistentDialogTask(Func<IPostToBot> makeInner, IMessageActivity message, IConnectorClient client, IBotToUser botToUser, IBotData botData)
         {
             SetField.NotNull(out this.message, nameof(message), message);
             SetField.NotNull(out this.client, nameof(client), client);
@@ -365,67 +405,81 @@ namespace Microsoft.Bot.Builder.Dialogs.Internals
 
         async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
         {
-            await botData.LoadAsync();
+            await botData.LoadAsync(token);
             try
             {
                 await this.inner.Value.PostAsync<T>(item, token);
             }
-            catch
+            finally
             {
-                await botData.FlushAsync(); 
-                await PersistBotData(token: token);
-                throw;
-
-            }
-
-            await botData.FlushAsync();
-            // if botToUser is SendLastInline_BotToUser, we don't need to persist.
-            // Inline reply will set the data
-            bool inline = botToUser is SendLastInline_BotToUser || botToUser is BotToUserTextWriter;
-            if (!inline)
-            {   
-                await PersistBotData(token: token);
+                await botData.FlushAsync(token);
             }
         }
+    }
 
-        private async Task PersistBotData(bool ignoreETag = true, CancellationToken token = default(CancellationToken))
+    public sealed class SerializingDialogTask : IPostToBot
+    {
+        private readonly IPostToBot inner;
+        private readonly Address address;
+        private readonly IScope<Address> scopeForCookie;
+
+        public SerializingDialogTask(IPostToBot inner, Address address, IScope<Address> scopeForCookie)
         {
-            var botId = message.To.Id;
-            var userId = message.From.Id;
-            var conversationId = message.ConversationId;
-            var etag = "*";
+            SetField.NotNull(out this.inner, nameof(inner), inner);
+            SetField.NotNull(out this.address, nameof(address), address);
+            SetField.NotNull(out this.scopeForCookie, nameof(scopeForCookie), scopeForCookie);
+        }
 
-            var conversationData = new BotData(eTag: etag);
-            var perUserInConversationData  = new BotData(eTag: etag);
-            var userData = new BotData(eTag: etag);
-
-            if (!ignoreETag)
+        async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
+        {
+            using (await this.scopeForCookie.WithScopeAsync(this.address, token))
             {
-                var getConversationDataTask = client.Bots.GetConversationDataAsync(botId, conversationId, token);
-                var getPerUserInConversationDataTask = client.Bots.GetPerUserConversationDataAsync(botId, conversationId, userId, token);
-                var getUserDataTask = client.Bots.GetUserDataAsync(botId, userId, token);
-
-                conversationData = await getConversationDataTask;
-                perUserInConversationData = await getPerUserInConversationDataTask;
-                userData = await getUserDataTask;
+                await this.inner.PostAsync(item, token);
             }
+        }
+    }
 
-            conversationData.Data = message.BotConversationData;
-            perUserInConversationData.Data = message.BotPerUserInConversationData;
-            userData.Data = message.BotUserData;
-            
-            var task1 = client.Bots.SetConversationDataAsync(botId, conversationId,
-                conversationData,
-                token);
-            var task2 = client.Bots.SetPerUserInConversationDataAsync(botId, conversationId, userId,
-                perUserInConversationData,
-                token);
-            var task3 = client.Bots.SetUserDataAsync(botId, userId,
-                userData,
-                token);
-            await task1;
-            await task2;
-            await task3;
+    public sealed class PostUnhandledExceptionToUserTask : IPostToBot
+    {
+        private readonly IPostToBot inner;
+        private readonly IBotToUser botToUser;
+        private readonly ResourceManager resources;
+        private readonly TraceListener trace;
+
+        public PostUnhandledExceptionToUserTask(IPostToBot inner, IBotToUser botToUser, ResourceManager resources, TraceListener trace)
+        {
+            SetField.NotNull(out this.inner, nameof(inner), inner);
+            SetField.NotNull(out this.botToUser, nameof(botToUser), botToUser);
+            SetField.NotNull(out this.resources, nameof(resources), resources);
+            SetField.NotNull(out this.trace, nameof(trace), trace);
+        }
+
+        async Task IPostToBot.PostAsync<T>(T item, CancellationToken token)
+        {
+            try
+            {
+                await this.inner.PostAsync<T>(item, token);
+            }
+            catch (Exception error)
+            {
+                try
+                {
+                    if (Debugger.IsAttached)
+                    {
+                        await this.botToUser.PostAsync($"Exception: {error}");
+                    }
+                    else
+                    {
+                        await this.botToUser.PostAsync(this.resources.GetString("UnhandledExceptionToUser"));
+                    }
+                }
+                catch (Exception inner)
+                {
+                    this.trace.WriteLine(inner);
+                }
+
+                throw;
+            }
         }
     }
 }

@@ -46,6 +46,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
     /// Recognizer for enumerated values.
     /// </summary>
     public sealed class RecognizeEnumeration<T> : IRecognize<T>
+        where T : class
     {
         /// <summary>
         /// Delegate for mapping from a C# value to it's description.
@@ -69,7 +70,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
         {
             _form = field.Form;
             _allowNumbers = field.AllowNumbers;
-            _description = field.FieldDescription;
+            _description = field.FieldDescription.Description;
             _terms = field.FieldTerms.ToArray();
             _values = field.Values.ToArray();
             _valueDescriptions = field.ValueDescriptions.ToArray();
@@ -80,7 +81,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
                 : (field.AllowsMultiple ? TemplateUsage.EnumManyWordHelp : TemplateUsage.EnumOneWordHelp));
             _noPreference = field.Optional ? field.Form.Configuration.NoPreference : null;
             _currentChoice = field.Form.Configuration.CurrentChoice.FirstOrDefault();
-            BuildPerValueMatcher(from term in field.Form.Configuration.CurrentChoice select Regex.Escape(term));
+            BuildPerValueMatcher(from term in field.Form.Configuration.CurrentChoice select Regex.Escape(term.Trim()).Replace(" ", @"\s+"));
         }
 
         public object[] PromptArgs()
@@ -136,7 +137,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
                 args.Add(null);
             }
             args.Add(Language.BuildList(from val in values select Language.Normalize(val, _helpFormat.ChoiceCase), _helpFormat.ChoiceSeparator, _helpFormat.ChoiceLastSeparator));
-            return new Prompter<T>(_helpFormat, _form, this).Prompt(state, "", args.ToArray()).Prompt;
+            return new Prompter<T>(_helpFormat, _form, this).Prompt(state, null, args.ToArray()).Prompt;
         }
 
         public IEnumerable<TermMatch> Matches(string input, object defaultValue)
@@ -244,13 +245,14 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
         private int AddExpression(int n, object value, IEnumerable<string> terms, bool allowNumbers)
         {
             var orderedTerms = (from term in terms orderby term.Length descending select term).ToArray();
+            var words = new StringBuilder();
+            var nonWords = new StringBuilder();
+            var first = true;
+            var firstNonWord = true;
+            int maxWords = 0;
             if (orderedTerms.Length > 0)
             {
-                var maxWords = terms.Max((term) => NumberOfWords(term));
-                var words = new StringBuilder();
-                var nonWords = new StringBuilder();
-                var first = true;
-                var firstNonWord = true;
+                maxWords = terms.Max(NumberOfWords);
                 foreach (var term in orderedTerms)
                 {
                     var nterm = term.Trim().Replace(" ", @"\s+");
@@ -288,23 +290,23 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
                         }
                     }
                 }
-                if (first)
-                {
-                    words.Append('(');
-                    words.Append(NOMATCH);
-                }
-                words.Append(@")\b)");
-                if (firstNonWord)
-                {
-                    nonWords.Append('(');
-                    nonWords.Append(NOMATCH);
-                }
-                nonWords.Append(')');
-                var numbers = allowNumbers ? $"(\\b{n}\\b)" : NOMATCH;
-                var expr = $"{numbers}|{words.ToString()}|{nonWords.ToString()}";
-                _expressions.Add(new ValueAndExpression(value, new Regex(expr.ToString(), RegexOptions.IgnoreCase), maxWords));
-                ++n;
             }
+            if (first)
+            {
+                words.Append(@"(\b(?:");
+                words.Append(NOMATCH);
+            }
+            words.Append(@")\b)");
+            if (firstNonWord)
+            {
+                nonWords.Append('(');
+                nonWords.Append(NOMATCH);
+            }
+            nonWords.Append(')');
+            var numbers = allowNumbers ? $"(\\b{n}\\b)" : NOMATCH;
+            var expr = $"{numbers}|{words.ToString()}|{nonWords.ToString()}";
+            _expressions.Add(new ValueAndExpression(value, new Regex(expr.ToString(), RegexOptions.IgnoreCase), maxWords));
+            ++n;
             return n;
         }
 
@@ -517,7 +519,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
         {
             var prompt = new Prompter<T>(_field.Template(TemplateUsage.BoolHelp), _field.Form, null);
             var args = HelpArgs(state, defaultValue);
-            return prompt.Prompt(state, _field.Name, args.ToArray()).Prompt;
+            return prompt.Prompt(state, _field, args.ToArray()).Prompt;
         }
 
         public override IEnumerable<string> ValidInputs(object value)
@@ -584,7 +586,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
         {
             var prompt = new Prompter<T>(_field.Template(TemplateUsage.StringHelp), _field.Form, null);
             var args = HelpArgs(state, defaultValue);
-            return prompt.Prompt(state, _field.Name, args.ToArray()).Prompt;
+            return prompt.Prompt(state, _field, args.ToArray()).Prompt;
         }
     }
 
@@ -646,7 +648,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
                 args.Add(_min);
                 args.Add(_max);
             }
-            return prompt.Prompt(state, _field.Name, args.ToArray()).Prompt;
+            return prompt.Prompt(state, _field, args.ToArray()).Prompt;
         }
 
         private long _min;
@@ -710,7 +712,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
                 args.Add(_min);
                 args.Add(_max);
             }
-            return prompt.Prompt(state, _field.Name, args.ToArray()).Prompt;
+            return prompt.Prompt(state, _field, args.ToArray()).Prompt;
         }
 
         private double _min;
@@ -743,7 +745,7 @@ namespace Microsoft.Bot.Builder.FormFlow.Advanced
         {
             var prompt = new Prompter<T>(_field.Template(TemplateUsage.DateTimeHelp), _field.Form, null);
             var args = HelpArgs(state, defaultValue);
-            return prompt.Prompt(state, _field.Name, args.ToArray()).Prompt;
+            return prompt.Prompt(state, _field, args.ToArray()).Prompt;
         }
 
         public override TermMatch Parse(string input)

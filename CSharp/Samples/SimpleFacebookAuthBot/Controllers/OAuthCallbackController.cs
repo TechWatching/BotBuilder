@@ -6,15 +6,15 @@ using System;
 using System.Configuration;
 using System.Net;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Web;
 using System.Web.Http;
 
 namespace Microsoft.Bot.Sample.SimpleFacebookAuthBot.Controllers
 {
     public class OAuthCallbackController : ApiController
     {
-        private static Lazy<string> botId = new Lazy<string>(() => ConfigurationManager.AppSettings["AppId"]);
-
         /// <summary>
         /// OAuth call back that is called by Facebook. Read https://developers.facebook.com/docs/facebook-login/manually-build-a-login-flow for more details.
         /// </summary>
@@ -25,38 +25,31 @@ namespace Microsoft.Bot.Sample.SimpleFacebookAuthBot.Controllers
         /// <returns></returns>
         [HttpGet]
         [Route("api/OAuthCallback")]
-        public async Task<HttpResponseMessage> OAuthCallback([FromUri] string userId, [FromUri] string conversationId, [FromUri] string channelId, [FromUri] string language, [FromUri] string code, [FromUri] string state)
+        public async Task<HttpResponseMessage> OAuthCallback([FromUri] string userId, [FromUri] string botId, [FromUri] string conversationId, [FromUri] string channelId, [FromUri] string serviceUrl, [FromUri] string locale, [FromUri] string code, [FromUri] string state, CancellationToken token)
         {
             // Get the resumption cookie
-            var resumptionCookie = new ResumptionCookie(userId, botId.Value, conversationId, channelId, language);
+            var resumptionCookie = new ResumptionCookie(FacebookHelpers.TokenDecoder(userId), FacebookHelpers.TokenDecoder(botId), FacebookHelpers.TokenDecoder(conversationId), channelId, FacebookHelpers.TokenDecoder(serviceUrl), locale);
 
             // Exchange the Facebook Auth code with Access token
-            var token = await FacebookHelpers.ExchangeCodeForAccessToken(resumptionCookie, code, SimpleFacebookAuthDialog.FacebookOauthCallback.ToString());
+            var accessToken = await FacebookHelpers.ExchangeCodeForAccessToken(resumptionCookie, code, SimpleFacebookAuthDialog.FacebookOauthCallback.ToString());
 
             // Create the message that is send to conversation to resume the login flow
             var msg = resumptionCookie.GetMessage();
-            msg.Text = $"token:{token.AccessToken}";
+            msg.Text = $"token:{accessToken.AccessToken}";
 
             // Resume the conversation to SimpleFacebookAuthDialog
-            var reply = await Conversation.ResumeAsync(resumptionCookie, msg);
+            await Conversation.ResumeAsync(resumptionCookie, msg);
 
-            using (var scope = DialogModule.BeginLifetimeScope(Conversation.Container, reply))
+            using (var scope = DialogModule.BeginLifetimeScope(Conversation.Container, msg))
             {
                 var dataBag = scope.Resolve<IBotData>();
-                await dataBag.LoadAsync();
+                await dataBag.LoadAsync(token);
                 ResumptionCookie pending;
-                if (dataBag.PerUserInConversationData.TryGetValue("persistedCookie", out pending))
+                if (dataBag.PrivateConversationData.TryGetValue("persistedCookie", out pending))
                 {
-                    dataBag.PerUserInConversationData.RemoveValue("persistedCookie");
-                    // make sure that we have the right Channel info for the outgoing message
-                    var persistedCookie = pending.GetMessage();
-                    reply.To = persistedCookie.From;
-                    reply.From = persistedCookie.To;
-
-                    // Send the login success asynchronously to user
-                    var client = scope.Resolve<IConnectorClient>();
-                    await client.Messages.SendMessageAsync(reply);
-
+                    // remove persisted cookie
+                    dataBag.PrivateConversationData.RemoveValue("persistedCookie");
+                    await dataBag.FlushAsync(token);
                     return Request.CreateResponse("You are now logged in! Continue talking to the bot.");
                 }
                 else

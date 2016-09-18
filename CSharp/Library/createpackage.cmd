@@ -4,6 +4,7 @@ setlocal enabledelayedexpansion
 setlocal enableextensions
 set errorlevel=0
 erase /s *.nupkg
+msbuild /property:Configuration=release Microsoft.Bot.Connector\Microsoft.Bot.Connector.csproj 
 msbuild /property:Configuration=release Microsoft.Bot.Builder.csproj 
 msbuild /property:Configuration=release Microsoft.Bot.Builder.FormFlow.Json\Microsoft.Bot.Builder.FormFlow.Json.csproj
 msbuild /property:Configuration=release ..\tools\rview\rview.csproj
